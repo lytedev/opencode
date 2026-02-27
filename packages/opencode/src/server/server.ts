@@ -81,6 +81,8 @@ export namespace Server {
           // Allow CORS preflight requests to succeed without auth.
           // Browser clients sending Authorization headers will preflight with OPTIONS.
           if (c.req.method === "OPTIONS") return next()
+          // Allow the embedded UI through without auth — it handles auth itself via the API password prompt
+          if (!c.req.path.startsWith("/v1")) return next()
           const password = Flag.OPENCODE_SERVER_PASSWORD
           if (!password) return next()
           const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
@@ -541,8 +543,22 @@ export namespace Server {
           },
         )
         .all("/*", async (c) => {
-          const path = c.req.path
+          const embeddedWebUI = Flag.OPENCODE_DISABLE_EMBEDDED_WEB_UI
+            ? null
+            // @ts-expect-error - generated file at build time
+            : await import("opencode-web-ui.gen.ts").then((m) => m.default as Record<string, string>).catch(() => null)
 
+          if (embeddedWebUI) {
+            const reqPath = c.req.path.replace(/^\//, "")
+            const match = embeddedWebUI[reqPath] ?? embeddedWebUI["index.html"] ?? null
+            if (!match) return c.json({ error: "Not Found" }, 404)
+            const file = Bun.file(match)
+            if (!(await file.exists())) return c.json({ error: "Not Found" }, 404)
+            c.header("Content-Type", file.type)
+            return c.body(await file.arrayBuffer())
+          }
+
+          const path = c.req.path
           const response = await proxy(`https://app.opencode.ai${path}`, {
             ...c.req,
             headers: {
